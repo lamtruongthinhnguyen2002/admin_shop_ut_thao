@@ -1,0 +1,35 @@
+name: admin_shop_ut_thao
+description: "Hệ thống quản lý đơn hàng dành cho Shop Út Thảo"
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+# HTTP Client
+  dio: ^5.4.0
+ # State Management
+  provider: ^6.1.1
+  
+  # QR Code
+  mobile_scanner: ^4.0.0        # Quét QR (mobile)
+  qr_flutter: ^4.1.0            # Hiển thị QR
+  
+  # PDF Export
+  pdf: ^3.10.8
+  printing: ^5.12.0
+  
+  # Routing
+  go_router: ^13.0.0
+  
+  # UI
+  fl_chart: ^0.67.0             # Charts cho Dashboard
+  data_table_2: ^2.5.14         # Bảng dữ liệu Desktop
+  image_picker: ^1.0.7          # Upload ảnh sản phẩm
+  cached_network_image: ^3.3.1  # Hiển thị ảnh
+  intl: ^0.19.0                 # Format tiền VND
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
