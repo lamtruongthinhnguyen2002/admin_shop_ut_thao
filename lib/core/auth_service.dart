@@ -1,22 +1,27 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'models/user.dart';
 
 class AuthService extends ChangeNotifier {
-  static const _tokenKey = 'auth_token';
-  static const _userKey  = 'auth_user';
-  static const String baseUrl = 'http://localhost:3000/api';
+  static const _userKey        = 'auth_user';
+  static const _lastActiveKey  = 'last_active_ms';
+  static const _sessionTimeout = Duration(hours: 8); // Slide 5: auto logout 8h
+  static const String baseUrl  = 'http://localhost:3000/api';
 
-  User?  _currentUser;
-  bool   _loading = true;     // đang kiểm tra token lưu sẵn
+  User?   _currentUser;
+  bool    _loading = true;
   String? _error;
 
-  User?  get currentUser => _currentUser;
-  bool   get isLoggedIn  => _currentUser != null;
-  bool   get loading     => _loading;
-  String? get error      => _error;
+  // ── Inactivity timer ──────────────────────────────────
+  Timer? _inactivityTimer;
+
+  User?   get currentUser => _currentUser;
+  bool    get isLoggedIn  => _currentUser != null;
+  bool    get loading     => _loading;
+  String? get error       => _error;
 
   final Dio _dio = Dio(BaseOptions(
     baseUrl: baseUrl,
@@ -25,16 +30,23 @@ class AuthService extends ChangeNotifier {
     contentType: 'application/json',
   ));
 
-  // ─── Khởi tạo: đọc token đã lưu ──────────────────────
+  // ─── Khởi tạo: đọc session đã lưu ───────────────────
   Future<void> init() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs   = await SharedPreferences.getInstance();
       final userStr = prefs.getString(_userKey);
       if (userStr != null) {
         final json = jsonDecode(userStr) as Map<String, dynamic>;
-        _currentUser = User.fromJson(json, json['token']);
-        // Verify token còn hợp lệ
-        await _verifyToken(_currentUser!.token);
+        // Slide 5: Kiểm tra thời gian inactivity
+        final lastActiveMs = prefs.getInt(_lastActiveKey) ?? 0;
+        final elapsed = DateTime.now().millisecondsSinceEpoch - lastActiveMs;
+        if (elapsed > _sessionTimeout.inMilliseconds) {
+          // Quá 8 giờ → xoá session
+          await _clearSession(prefs);
+        } else {
+          _currentUser = User.fromJson(json, json['token'] ?? '');
+          _startInactivityTimer();
+        }
       }
     } catch (_) {
       _currentUser = null;
@@ -44,32 +56,19 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  Future<void> _verifyToken(String token) async {
-    try {
-      final res = await _dio.get('/auth/me',
-          options: Options(headers: {'Authorization': 'Bearer $token'}));
-      if (res.statusCode != 200) _currentUser = null;
-    } catch (_) {
-      // Token hết hạn hoặc server chưa chạy → vẫn cho dùng offline
-    }
-  }
-
-  // ─── Đăng nhập ────────────────────────────────────────
+  // ─── Đăng nhập ───────────────────────────────────────
   Future<bool> login(String username, String password) async {
     _error = null;
     notifyListeners();
-
     try {
-      final res = await _dio.post('/auth/login', data: {
-        'username': username.trim(),
-        'password': password,
-      });
-
+      final res = await _dio.post('/auth/login',
+          data: {'username': username.trim(), 'password': password});
       if (res.statusCode == 200) {
-        final token = res.data['token'] as String;
+        final token    = res.data['token'] as String;
         final userData = res.data['user'] as Map<String, dynamic>;
-        _currentUser = User.fromJson(userData, token);
-        await _saveToPrefs(_currentUser!);
+        _currentUser   = User.fromJson(userData, token);
+        await _saveSession();
+        _startInactivityTimer();
         notifyListeners();
         return true;
       } else {
@@ -80,15 +79,13 @@ class AuthService extends ChangeNotifier {
     } on DioException catch (e) {
       if (e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.connectionError) {
-        // Offline mode: dùng tài khoản mặc định để dev/test
+        // Offline: tài khoản mặc định để test
         if (username == 'admin' && password == 'admin123') {
           _currentUser = const User(
-            id: 'offline',
-            username: 'admin',
-            role: 'admin',
-            fullName: 'Quản Trị Viên',
-            token: 'offline_token',
-          );
+            id: 'offline', username: 'admin', role: 'admin',
+            fullName: 'Quản Trị Viên', token: 'offline_token');
+          await _saveSession();
+          _startInactivityTimer();
           notifyListeners();
           return true;
         }
@@ -96,31 +93,92 @@ class AuthService extends ChangeNotifier {
       } else if (e.response?.statusCode == 401) {
         _error = 'Sai tên đăng nhập hoặc mật khẩu';
       } else {
-        _error = 'Lỗi: ${e.message}';
+        _error = 'Đăng nhập thất bại. Vui lòng thử lại.';
       }
       notifyListeners();
       return false;
     }
   }
 
-  // ─── Đăng xuất ────────────────────────────────────────
+  // ─── Đổi thông tin profile ────────────────────────────
+  Future<Map<String, dynamic>> updateProfile({
+    String? fullName,
+    String? newUsername,
+    String? currentPassword,
+    String? newPassword,
+  }) async {
+    try {
+      final res = await _dio.put(
+        '/auth/profile',
+        data: {
+          if (fullName     != null) 'full_name':       fullName,
+          if (newUsername  != null) 'new_username':    newUsername,
+          if (currentPassword != null) 'current_password': currentPassword,
+          if (newPassword  != null) 'new_password':    newPassword,
+        },
+        options: Options(headers: {'Authorization': authHeader}),
+      );
+      if (res.statusCode == 200) {
+        // Cập nhật local user
+        final updated = res.data['user'] as Map<String, dynamic>;
+        _currentUser  = User.fromJson(updated, _currentUser!.token);
+        await _saveSession();
+        notifyListeners();
+        return {'success': true, 'message': 'Cập nhật thành công'};
+      }
+      return {'success': false, 'message': res.data['message'] ?? 'Lỗi'};
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 400) {
+        return {'success': false, 'message': e.response?.data['message'] ?? 'Dữ liệu không hợp lệ'};
+      }
+      return {'success': false, 'message': 'Không kết nối được server'};
+    }
+  }
+
+  // ─── Đăng xuất ───────────────────────────────────────
   Future<void> logout() async {
+    _inactivityTimer?.cancel();
     _currentUser = null;
+    _error = null;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_tokenKey);
-    await prefs.remove(_userKey);
+    await _clearSession(prefs);
     notifyListeners();
   }
 
-  // ─── Lưu vào SharedPreferences ────────────────────────
-  Future<void> _saveToPrefs(User user) async {
+  // ─── Cập nhật last active (gọi khi user tương tác) ───
+  Future<void> refreshActivity() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_userKey, jsonEncode(user.toJson()));
+    await prefs.setInt(
+        _lastActiveKey, DateTime.now().millisecondsSinceEpoch);
+    // Reset timer
+    _startInactivityTimer();
   }
 
-  // ─── Lấy Authorization header ─────────────────────────
+  // ─── Timer tự động logout sau 8h không hoạt động ─────
+  void _startInactivityTimer() {
+    _inactivityTimer?.cancel();
+    _inactivityTimer = Timer(_sessionTimeout, () async {
+      if (_currentUser != null) {
+        await logout();
+      }
+    });
+  }
+
+  // ─── Helpers ─────────────────────────────────────────
+  Future<void> _saveSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_userKey, jsonEncode(_currentUser!.toJson()));
+    await prefs.setInt(
+        _lastActiveKey, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  Future<void> _clearSession(SharedPreferences prefs) async {
+    await prefs.remove(_userKey);
+    await prefs.remove(_lastActiveKey);
+    _currentUser = null;
+  }
+
   String get authHeader => 'Bearer ${_currentUser?.token ?? ""}';
 }
 
-// Singleton
 final authService = AuthService();
