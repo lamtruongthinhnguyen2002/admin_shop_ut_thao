@@ -7,6 +7,10 @@ const QRCode   = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
 const { authenticate, requireAdmin } = require('./middleware/auth');
 
+// ── ĐỌC SWAGGER QUA FILE JSON TĨNH ────────────────────────
+const swaggerUi = require('swagger-ui-express');
+const swaggerDocument = require('./swagger.json'); 
+
 const app  = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -17,6 +21,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
+
+// ── ROUTE HIỂN THỊ SWAGGER UI ─────────────────────────────
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // ── Routes ────────────────────────────────────────────────
 
@@ -71,5 +78,5 @@ app.get('/api/health', (req, res) =>
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server chạy tại http://localhost:${PORT}`);
-  console.log(`📋 Tài khoản mặc định: admin / admin123`);
+  console.log(`🔍 Giao diện Test API Swagger UI tại: http://localhost:${PORT}/api-docs`);
 });
