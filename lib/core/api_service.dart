@@ -2,7 +2,6 @@ import 'package:dio/dio.dart';
 
 class ApiService {
   static const String baseUrl = 'http://localhost:3000/api';
-
   final Dio _dio = Dio(BaseOptions(
     baseUrl: baseUrl,
     connectTimeout: const Duration(seconds: 6),
